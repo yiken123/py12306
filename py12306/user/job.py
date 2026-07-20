@@ -319,69 +319,49 @@ class UserJob:
             # TODO 处理获取失败情况
         return False
 
-    def request_device_id(self, force_renew = False):
+    def request_device_id(self, force_renew=False):
         """
         获取加密后的浏览器特征 ID
         :return:
         """
-        # 判断cookie 是否过期，未过期可以不必下载
-        expire_time =  self.session.cookies.get('RAIL_EXPIRATION')
+        expire_time = self.session.cookies.get('RAIL_EXPIRATION')
         if not force_renew and expire_time and int(expire_time) - time_int_ms() > 0:
             return
-        if 'pjialin' not in API_GET_BROWSER_DEVICE_ID:
-            return self.request_device_id2()
-        response = self.session.get(API_GET_BROWSER_DEVICE_ID)
-        if response.status_code == 200:
-            try:
-                result = json.loads(response.text)
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.61 Safari/537.36"
-                }
-                self.session.headers.update(headers)
-                response = self.session.get(base64.b64decode(result['id']).decode())
-                if response.text.find('callbackFunction') >= 0:
-                    result = response.text[18:-2]
-                result = json.loads(result)
-                if not Config().is_cache_rail_id_enabled():
-                   self.session.cookies.update({
-                       'RAIL_EXPIRATION': result.get('exp'),
-                       'RAIL_DEVICEID': result.get('dfp'),
-                   })
-                else:
-                   self.session.cookies.update({
-                       'RAIL_EXPIRATION': Config().RAIL_EXPIRATION,
-                       'RAIL_DEVICEID': Config().RAIL_DEVICEID,
-                   })
-            except Exception:
-                return self.request_device_id()
-        else:
-            return self.request_device_id()
+        return self.request_device_id2()
 
     def request_device_id2(self):
         headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.61 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.61 Safari/537.36"
         }
         self.session.headers.update(headers)
-        response = self.session.get(API_GET_BROWSER_DEVICE_ID)
-        if response.status_code == 200:
+        max_retry = 2
+        for attempt in range(max_retry):
             try:
-                if response.text.find('callbackFunction') >= 0:
-                    result = response.text[18:-2]
-                    result = json.loads(result)
-                    if not Config().is_cache_rail_id_enabled():
-                       self.session.cookies.update({
-                           'RAIL_EXPIRATION': result.get('exp'),
-                           'RAIL_DEVICEID': result.get('dfp'),
-                       })
-                    else:
-                       self.session.cookies.update({
-                           'RAIL_EXPIRATION': Config().RAIL_EXPIRATION,
-                           'RAIL_DEVICEID': Config().RAIL_DEVICEID,
-                       })
-            except Exception:
-                return self.request_device_id2()
-        else:
-            return self.request_device_id2()
+                response = self.session.get(API_GET_BROWSER_DEVICE_ID)
+                if response.status_code != 200:
+                    UserLog.add_quick_log('获取设备ID失败(HTTP {}),重试中({}/{})...'.format(
+                        response.status_code, attempt + 1, max_retry)).flush()
+                    time.sleep(3)
+                    continue
+                text = response.text
+                if text.find('callbackFunction') >= 0:
+                    text = text[18:-2]
+                result = json.loads(text)
+                if Config().is_cache_rail_id_enabled():
+                    self.session.cookies.update({
+                        'RAIL_EXPIRATION': Config().RAIL_EXPIRATION,
+                        'RAIL_DEVICEID': Config().RAIL_DEVICEID,
+                    })
+                else:
+                    self.session.cookies.update({
+                        'RAIL_EXPIRATION': result.get('exp'),
+                        'RAIL_DEVICEID': result.get('dfp'),
+                    })
+                return
+            except Exception as e:
+                UserLog.add_quick_log('获取设备ID异常: {},重试中({}/{})...'.format(e, attempt + 1, max_retry)).flush()
+                time.sleep(3)
+        UserLog.add_quick_log('获取设备ID失败，已达最大重试次数，跳过').flush()
 
     def login_did_success(self):
         """
@@ -446,7 +426,11 @@ class UserJob:
         while retry < Config().REQUEST_MAX_RETRY:
             retry += 1
             response = self.session.get(API_USER_INFO.get('url'))
-            result = response.json()
+            try:
+                result = response.json()
+            except Exception:
+                time.sleep(get_interval_num(self.sleep_interval))
+                continue
             user_data = result.get('data.userDTO.loginUserDTO')
             # 子节点访问会导致主节点登录失效 TODO 可快考虑实时同步 cookie
             if user_data:
@@ -507,45 +491,59 @@ class UserJob:
         self.is_alive = False
 
     def response_login_check(self, response, **kwargs):
-        if Config().is_master() and response.json().get('data.noLogin') == 'true':  # relogin
-            self.handle_login(expire=True)
+        try:
+            if Config().is_master() and response.json().get('data.noLogin') == 'true':  # relogin
+                self.handle_login(expire=True)
+        except Exception:
+            pass
 
     def get_user_passengers(self):
         if self.passengers: return self.passengers
-        response = self.session.post(API_USER_PASSENGERS)
-        result = response.json()
-        if result.get('data.normal_passengers'):
-            self.passengers = result.get('data.normal_passengers')
-            # 将乘客写入到文件
-            with open(Config().USER_PASSENGERS_FILE % self.user_name, 'w', encoding='utf-8') as f:
-                f.write(json.dumps(self.passengers, indent=4, ensure_ascii=False))
-            return self.passengers
-        else:
+        max_retry = 10
+        for _ in range(max_retry):
+            try:
+                response = self.session.post(API_USER_PASSENGERS, data={'pageIndex': 1, 'pageSize': 10})
+                print('[DEBUG passengers] status={} body={}'.format(response.status_code, response.text[:500]))
+                result = response.json()
+                datas = result.get('data') and result.get('data').get('datas') or result.get('data.datas')
+                print('[DEBUG datas] datas={}'.format(datas))
+            except Exception:
+                stay_second(get_interval_num(self.sleep_interval))
+                continue
+            if datas:
+                self.passengers = datas
+                with open(Config().USER_PASSENGERS_FILE % self.user_name, 'w', encoding='utf-8') as f:
+                    f.write(json.dumps(self.passengers, indent=4, ensure_ascii=False))
+                return self.passengers
             wait_time = get_interval_num(self.sleep_interval)
             UserLog.add_quick_log(
                 UserLog.MESSAGE_GET_USER_PASSENGERS_FAIL.format(
                     result.get('messages', CommonLog.MESSAGE_RESPONSE_EMPTY_ERROR), wait_time)).flush()
             if Config().is_slave():
-                self.load_user_from_remote()  # 加载最新 cookie
+                self.load_user_from_remote()
             stay_second(wait_time)
-            return self.get_user_passengers()
+        return []
 
     def can_access_passengers(self):
         retry = 0
         while retry < Config().REQUEST_MAX_RETRY:
             retry += 1
-            response = self.session.post(API_USER_PASSENGERS)
-            result = response.json()
-            if result.get('data.normal_passengers'):
+            try:
+                response = self.session.post(API_USER_PASSENGERS, data={'pageIndex': 1, 'pageSize': 10})
+                result = response.json()
+            except Exception:
+                stay_second(get_interval_num(self.sleep_interval))
+                continue
+            datas = result.get('data') and result.get('data').get('datas') or result.get('data.datas')
+            if datas:
                 return True
-            else:
-                wait_time = get_interval_num(self.sleep_interval)
-                UserLog.add_quick_log(
-                    UserLog.MESSAGE_TEST_GET_USER_PASSENGERS_FAIL.format(
-                        result.get('messages', CommonLog.MESSAGE_RESPONSE_EMPTY_ERROR), wait_time)).flush()
-                if Config().is_slave():
-                    self.load_user_from_remote()  # 加载最新 cookie
-                stay_second(wait_time)
+            wait_time = get_interval_num(self.sleep_interval)
+            UserLog.add_quick_log(
+                UserLog.MESSAGE_TEST_GET_USER_PASSENGERS_FAIL.format(
+                    result.get('messages', CommonLog.MESSAGE_RESPONSE_EMPTY_ERROR), wait_time)).flush()
+            if Config().is_slave():
+                self.load_user_from_remote()
+            stay_second(wait_time)
         return False
 
     def get_passengers_by_members(self, members):
@@ -616,10 +614,13 @@ class UserJob:
             OrderLog.add_quick_log(OrderLog.MESSAGE_REQUEST_INIT_DC_PAGE_FAIL).flush()  # 重试无用，直接跳过
             return False, False, html
         try:
+            import ast
             self.global_repeat_submit_token = token.groups()[0]
-            self.ticket_info_for_passenger_form = json.loads(form.groups()[0].replace("'", '"'))
-            self.order_request_dto = json.loads(order.groups()[0].replace("'", '"'))
-        except Exception:
+            self.ticket_info_for_passenger_form = ast.literal_eval(form.groups()[0])
+            self.order_request_dto = ast.literal_eval(order.groups()[0])
+        except Exception as e:
+            print('[DEBUG initdc] FAILED token={} form={} order={} err={} html[200:500]={}'.format(
+                bool(token), bool(form), bool(order), e, html[200:500]))
             return False, False, html  # TODO Error
 
         slide_val = re.search(r"var if_check_slide_passcode.*='(\d?)'", html)

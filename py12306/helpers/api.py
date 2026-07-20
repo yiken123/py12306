@@ -42,7 +42,7 @@ API_AUTH_UAMAUTHCLIENT = {
 API_USER_INFO = {
     'url': BASE_URL_OF_12306 + '/otn/modifyUser/initQueryUserInfoApi'
 }
-API_USER_PASSENGERS = BASE_URL_OF_12306 + '/otn/confirmPassenger/getPassengerDTOs'
+API_USER_PASSENGERS = BASE_URL_OF_12306 + '/otn/passengers/query'
 API_SUBMIT_ORDER_REQUEST = BASE_URL_OF_12306 + '/otn/leftTicket/submitOrderRequest'
 API_CHECK_ORDER_INFO = BASE_URL_OF_12306 + '/otn/confirmPassenger/checkOrderInfo'
 API_INITDC_URL = BASE_URL_OF_12306 + '/otn/confirmPassenger/initDc'  # 生成订单时需要先请求这个页面
@@ -50,9 +50,8 @@ API_GET_QUEUE_COUNT = BASE_URL_OF_12306 + '/otn/confirmPassenger/getQueueCount'
 API_CONFIRM_SINGLE_FOR_QUEUE = BASE_URL_OF_12306 + '/otn/confirmPassenger/confirmSingleForQueue'
 API_QUERY_ORDER_WAIT_TIME = BASE_URL_OF_12306 + '/otn/confirmPassenger/queryOrderWaitTime?{}'  # 排队查询
 API_QUERY_INIT_PAGE = BASE_URL_OF_12306 + '/otn/leftTicket/init'
-# API_GET_BROWSER_DEVICE_ID = BASE_URL_OF_12306 + '/otn/HttpZF/logdevice'
-API_GET_BROWSER_DEVICE_ID = 'https://12306-rail-id-v2.pjialin.com/'
-API_FREE_CODE_QCR_API = 'https://12306-ocr.pjialin.com/check/'
+API_GET_BROWSER_DEVICE_ID = BASE_URL_OF_12306 + '/otn/HttpZF/logdevice'
+API_FREE_CODE_QCR_API = 'https://12306-ocr.pjialin.com/check/'  # dead; configure AUTO_CODE_PLATFORM='user' with your own OCR
 
 API_NOTIFICATION_BY_VOICE_CODE = 'http://ali-voice.showapi.com/sendVoice?'
 API_NOTIFICATION_BY_VOICE_CODE_DINGXIN = 'http://yuyin2.market.alicloudapi.com/dx/voice_notice'

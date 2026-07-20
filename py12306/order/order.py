@@ -292,7 +292,10 @@ class Order:
             'query_to_station_name': self.query_ins.arrive_station,
         }
         response = self.session.post(API_SUBMIT_ORDER_REQUEST, data)
-        result = response.json()
+        try:
+            result = response.json()
+        except Exception:
+            result = {}
         if result.get('data') == '0':
             OrderLog.add_quick_log(OrderLog.MESSAGE_SUBMIT_ORDER_REQUEST_SUCCESS).flush()
             return True
@@ -337,7 +340,10 @@ class Order:
                 'scene': 'nc_login',
             })
         response = self.session.post(API_CHECK_ORDER_INFO, data)
-        result = response.json()
+        try:
+            result = response.json()
+        except Exception:
+            result = {}
         if result.get('data.submitStatus'):  # 成功
             # ifShowPassCode 需要验证码
             OrderLog.add_quick_log(OrderLog.MESSAGE_CHECK_ORDER_INFO_SUCCESS).flush()
@@ -392,7 +398,10 @@ class Order:
             'REPEAT_SUBMIT_TOKEN': self.user_ins.global_repeat_submit_token,
         }
         response = self.session.post(API_GET_QUEUE_COUNT, data)
-        result = response.json()
+        try:
+            result = response.json()
+        except Exception:
+            result = {}
         if result.get('status', False):  # 成功
             """
             "data": { 
@@ -470,7 +479,10 @@ class Order:
             pass
 
         response = self.session.post(API_CONFIRM_SINGLE_FOR_QUEUE, data)
-        result = response.json()
+        try:
+            result = response.json()
+        except Exception:
+            result = {}
 
         if 'data' in result:
             """
@@ -514,7 +526,10 @@ class Order:
             }
 
             response = self.session.get(API_QUERY_ORDER_WAIT_TIME.format(urllib.parse.urlencode(data)))
-            result = response.json()
+            try:
+                result = response.json()
+            except Exception:
+                result = {}
 
             if result.get('status') and 'data' in result:
                 """

@@ -45,8 +45,10 @@ class Job:
     passengers = []
     allow_less_member = False
     retry_time = 3
+    _did_attempt_order = False
 
     interval = {}
+    interval_additional = 0
     interval_additional = 0
     interval_additional_max = 5
 
@@ -197,6 +199,9 @@ class Job:
                 Config.SEAT_TYPES.values())  # 未设置 则所有可用 TODO  合法检测
             self.handle_seats(allow_seats, ticket_info)
             if not self.is_alive: return
+            if self._did_attempt_order:
+                self._did_attempt_order = False
+                return
 
     def handle_seats(self, allow_seats, ticket_info):
         for seat in allow_seats:  # 检查座位是否有票
@@ -248,6 +253,8 @@ class Job:
             # 任务已成功 通知集群停止任务
             if order_result:
                 Event().job_destroy({'name': self.job_name})
+            self._did_attempt_order = True
+            return  # 无论成功失败，本次只提交一个订单
 
     def do_order(self, user):
         self.check_passengers()
@@ -266,11 +273,13 @@ class Job:
                 self.interval_additional += self.interval.get('min')
         else:
             self.interval_additional = 0
-        result = response.json().get('data.result')
+        parsed = response.json()
+        raw_data = parsed.get('data')
+        result = raw_data.get('result') if isinstance(raw_data, dict) else None
         return result if result else False
 
     def is_has_ticket(self, ticket_info):
-        return self.get_info_of_ticket_num() == 'Y' and self.get_info_of_order_text() == '预订'
+        return self.get_info_of_ticket_num() == 'Y'
 
     def is_has_ticket_by_seat(self, seat):
         return seat != '' and seat != '无' and seat != '*'
