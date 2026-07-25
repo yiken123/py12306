@@ -603,8 +603,43 @@ class UserJob:
         请求下单页面 拿到 token
         :return:
         """
-        data = {'_json_att': ''}
-        response = self.session.post(API_INITDC_URL, data)
+        # 12306 改版后 initDc 通常是浏览器导航请求,GET 而非 POST
+        # 优先 GET,带完整浏览器头;失败再尝试 POST
+        headers = {
+            'Referer': 'https://kyfw.12306.cn/otn/leftTicket/initMy12306',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'X-Requested-With': 'XMLHttpRequest',
+        }
+        response = self.session.get(API_INITDC_URL, headers=headers)
+        print('[DEBUG initdc] status={} ct={} body[:200]={}'.format(
+            response.status_code,
+            response.headers.get('Content-Type', '?'),
+            response.text[:200] if response.text else 'EMPTY'))
+
+        # 优先按 JSON 解析(2026 改版后格式)
+        try:
+            result = response.json()
+            if isinstance(result, dict) and result.get('status') and 'data' in result:
+                dc_data = result['data'] or {}
+                token = dc_data.get('globalRepeatSubmitToken')
+                form = dc_data.get('ticketInfoForPassengerForm')
+                order = dc_data.get('orderRequestDTO')
+                if token and form and order:
+                    self.global_repeat_submit_token = token
+                    self.ticket_info_for_passenger_form = form
+                    self.order_request_dto = order
+                    # 滑块验证码标记,新接口放在 data.if_check_slide_passcode
+                    is_slide = str(dc_data.get('if_check_slide_passcode', '0')) == '1'
+                    print('[DEBUG initdc] OK token={} form_type={} order_type={} is_slide={}'.format(
+                        bool(token), type(form).__name__, type(order).__name__, is_slide))
+                    return True, is_slide, response.text
+                else:
+                    print('[DEBUG initdc] JSON but missing fields token={} form={} order={}'.format(
+                        bool(token), bool(form), bool(order)))
+        except Exception as e:
+            print('[DEBUG initdc] JSON parse failed: {}'.format(e))
+
+        # 回退:旧版 HTML 内嵌 JS 变量解析
         html = response.text
         token = re.search(r'var globalRepeatSubmitToken = \'(.+?)\'', html)
         form = re.search(r'var ticketInfoForPassengerForm *= *(\{.+\})', html)
@@ -615,9 +650,19 @@ class UserJob:
             return False, False, html
         try:
             import ast
-            self.global_repeat_submit_token = token.groups()[0]
-            self.ticket_info_for_passenger_form = ast.literal_eval(form.groups()[0])
-            self.order_request_dto = ast.literal_eval(order.groups()[0])
+            token_val = token.groups()[0]
+            form_text = form.groups()[0].replace('null', 'None').replace('true', 'True').replace('false', 'False')
+            order_text = order.groups()[0].replace('null', 'None').replace('true', 'True').replace('false', 'False')
+            form_val = ast.literal_eval(form_text)
+            order_val = ast.literal_eval(order_text)
+            # 防伪:首页 HTML 含 var ticketInfoForPassengerForm = null 时会被解析成 None,
+            # 这种"假 token"必须拒绝,否则下游 None[...] 会崩
+            if form_val is None or order_val is None or not token_val:
+                print('[DEBUG initdc] FAKE token from homepage html (form/order is None) reject')
+                return False, False, html
+            self.global_repeat_submit_token = token_val
+            self.ticket_info_for_passenger_form = form_val
+            self.order_request_dto = order_val
         except Exception as e:
             print('[DEBUG initdc] FAILED token={} form={} order={} err={} html[200:500]={}'.format(
                 bool(token), bool(form), bool(order), e, html[200:500]))

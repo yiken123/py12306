@@ -166,6 +166,10 @@ class Order:
     retry_time = 3
     wait_queue_interval = 3
 
+    # 下单失败冷却:防止 Query 主循环 0.5s 一轮反复打同一张票
+    user_fail_cooldown_until = {}  # {user_key: unix_ts}
+    fail_cooldown_seconds = 10
+
     order_id = 0
 
     notification_sustain_time = 60 * 30  # 通知持续时间 30 分钟
@@ -197,14 +201,21 @@ class Order:
         return self.normal_order()
 
     def normal_order(self):
+        # 失败冷却:同一用户 10 秒内已失败则跳过,避免 Query 主循环反复重打
+        until = self.user_fail_cooldown_until.get(self.user_ins.key, 0)
+        if time_int() < until:
+            remaining = until - time_int()
+            print('[DEBUG cooldown] user={} skip remaining={}s'.format(self.user_ins.key, remaining))
+            return False
+
         order_request_res = self.submit_order_request()
         if order_request_res == -1:
             return self.order_did_success()
         elif not order_request_res:
-            return
+            return self._mark_fail_and_return()
         init_res, self.is_slide, init_html = self.user_ins.request_init_dc_page()
         if not init_res:
-            return
+            return self._mark_fail_and_return()
         slide_info = {}
         if self.is_slide:
             try:
@@ -213,19 +224,24 @@ class Order:
                     raise RuntimeError("Order failed")
             except Exception:
                 OrderLog.add_quick_log('滑动验证码识别失败').flush()
-                return
+                return self._mark_fail_and_return()
             OrderLog.add_quick_log('滑动验证码识别成功').flush()
         if not self.check_order_info(slide_info):
-            return
+            return self._mark_fail_and_return()
         if not self.get_queue_count():
-            return
+            return self._mark_fail_and_return()
         if not self.confirm_single_for_queue():
-            return
+            return self._mark_fail_and_return()
         order_id = self.query_order_wait_time()
         if order_id:  # 发送通知
             self.order_id = order_id
             self.order_did_success()
             return True
+        return self._mark_fail_and_return()
+
+    def _mark_fail_and_return(self):
+        """下单失败统一出口:记录冷却时间戳并返回 False"""
+        self.user_fail_cooldown_until[self.user_ins.key] = time_int() + self.fail_cooldown_seconds
         return False
 
     def order_did_success(self):
@@ -296,6 +312,9 @@ class Order:
             result = response.json()
         except Exception:
             result = {}
+        print('[DEBUG submitOrder] status={} url={} data={} result={}'.format(
+            response.status_code, API_SUBMIT_ORDER_REQUEST, list(data.keys()),
+            str(result)[:300] if result else 'EMPTY'))
         if result.get('data') == '0':
             OrderLog.add_quick_log(OrderLog.MESSAGE_SUBMIT_ORDER_REQUEST_SUCCESS).flush()
             return True
@@ -344,23 +363,36 @@ class Order:
             result = response.json()
         except Exception:
             result = {}
-        if result.get('data.submitStatus'):  # 成功
-            # ifShowPassCode 需要验证码
+        print('[DEBUG checkOrderInfo] status={} url={} has_token={} is_slide={} result={}'.format(
+            response.status_code, API_CHECK_ORDER_INFO,
+            bool(self.user_ins.global_repeat_submit_token), self.is_slide,
+            str(result)[:400] if result else 'EMPTY'))
+        # 精确诊断 Dict.get 行为
+        print('[DEBUG checkOrderInfo] result_type={} data_type={} has_data={}'.format(
+            type(result).__name__, type(result.get('data')).__name__, 'data' in result))
+        _ss = result.get('data.submitStatus')
+        _ss2 = result.get('data').get('submitStatus') if result.get('data') else 'NO_DATA'
+        _ss3 = result['data']['submitStatus'] if 'data' in result else 'NO_DATA'
+        print('[DEBUG checkOrderInfo] submitStatus via dot={} via chained={} via raw={}'.format(_ss, _ss2, _ss3))
+        if _ss or _ss3:  # 成功
+            # ifShowPassCode / ifShowPassCodeTime 需要验证码(12306 改版后字段名变化)
             OrderLog.add_quick_log(OrderLog.MESSAGE_CHECK_ORDER_INFO_SUCCESS).flush()
-            if result.get('data.ifShowPassCode') != 'N':
+            # 用 raw 访问替代 Dict.get,规避某些情况下 dict.get 不支持点分键的坑
+            if result.get('data') and (result['data'].get('ifShowPassCode', 'N') != 'N' or result['data'].get('ifShowPassCodeTime')):
                 self.is_need_auth_code = True
 
             # if ( ticketInfoForPassengerForm.isAsync == ticket_submit_order.request_flag.isAsync & & ticketInfoForPassengerForm.queryLeftTicketRequestDTO.ypInfoDetail != "") { 不需要排队检测 js TODO
             return True
         else:
             error = CommonLog.MESSAGE_API_RESPONSE_CAN_NOT_BE_HANDLE
-            if not result.get('data.isNoActive'):
-                error = result.get('data.errMsg', CommonLog.MESSAGE_RESPONSE_EMPTY_ERROR)
+            data_obj = result.get('data') if result.get('data') else {}
+            if not data_obj.get('isNoActive'):
+                error = data_obj.get('errMsg') or CommonLog.MESSAGE_RESPONSE_EMPTY_ERROR
             else:
-                if result.get('data.checkSeatNum'):
-                    error = '无法提交您的订单! ' + result.get('data.errMsg')
+                if data_obj.get('checkSeatNum'):
+                    error = '无法提交您的订单! ' + (data_obj.get('errMsg') or '')
                 else:
-                    error = '出票失败! ' + result.get('data.errMsg')
+                    error = '出票失败! ' + (data_obj.get('errMsg') or '')
             OrderLog.add_quick_log(OrderLog.MESSAGE_CHECK_ORDER_INFO_FAIL.format(error)).flush()
         return False
 
@@ -402,36 +434,50 @@ class Order:
             result = response.json()
         except Exception:
             result = {}
+        print('[DEBUG getQueueCount] status={} result={}'.format(
+            response.status_code, str(result)[:400] if result else 'EMPTY'))
         if result.get('status', False):  # 成功
             """
-            "data": { 
+            "data": {
                 "count": "66",
-                "ticket": "0,73", 
+                "ticket": "0,73",
                 "op_2": "false",
                 "countT": "0",
                 "op_1": "true"
             }
-            
+
+            注:12306 改版后 ticket 字段可能为 "" 或单数字,需兼容空值
             """
             # if result.get('isRelogin') == 'Y': # 重新登录 TODO
 
-            ticket = result.get('data.ticket').split(',')  # 余票列表
-            # 这里可以判断 是真实是 硬座还是无座，避免自动分配到无座
-            ticket_number = ticket[0]  # 余票
-            if ticket_number != '充足' and int(ticket_number) <= 0:
+            ticket_raw = result.get('data.ticket', '') or ''
+            ticket_number = None
+            # 老格式 "0,73"(余票,无座);新格式可能为空串或单数字
+            if ticket_raw and ticket_raw != '充足':
+                try:
+                    parts = ticket_raw.split(',')
+                    ticket_number = int(parts[0])
+                except (ValueError, IndexError):
+                    ticket_number = None
+            # ticket_number 为 None 时(新版空值),信任 op_2 字段,不再做无座判断
+            if ticket_number is not None and ticket_number <= 0:
                 if self.query_ins.current_seat == SeatType.NO_SEAT:  # 允许无座
-                    ticket_number = ticket[1]
-                if not int(ticket_number):  # 跳过无座
+                    try:
+                        ticket_number = int(ticket_raw.split(',')[1])
+                    except (ValueError, IndexError):
+                        ticket_number = 0
+                if not ticket_number:  # 跳过无座
                     OrderLog.add_quick_log(OrderLog.MESSAGE_GET_QUEUE_INFO_NO_SEAT).flush()
-                    return False
+                    return self._mark_fail_and_return()
 
             if result.get('data.op_2') == 'true':
                 OrderLog.add_quick_log(OrderLog.MESSAGE_GET_QUEUE_LESS_TICKET).flush()
-                return False
+                return self._mark_fail_and_return()
 
             current_position = int(result.get('data.countT', 0))
+            display = ticket_number if ticket_number is not None else '未知'
             OrderLog.add_quick_log(
-                OrderLog.MESSAGE_GET_QUEUE_INFO_SUCCESS.format(current_position, ticket_number)).flush()
+                OrderLog.MESSAGE_GET_QUEUE_INFO_SUCCESS.format(current_position, display)).flush()
             return True
         else:
             # 加入小黑屋
@@ -458,14 +504,20 @@ class Order:
         REPEAT_SUBMIT_TOKEN	0977caf26f25d1da43e3213eb35ff87c
         :return:
         """
+        # 如果 initDc 没拿到 ticket_info_for_passenger_form(返回了 None 或 HTML 首页),
+        # 直接走失败冷却,不再继续,避免 KeyError/TypeError 把整条 order 链弄崩
+        tif = self.user_ins.ticket_info_for_passenger_form
+        if not tif or not isinstance(tif, dict):
+            print('[DEBUG confirmSingle] ticket_info_for_passenger_form missing/invalid, skip')
+            return self._mark_fail_and_return()
         data = {  #
             'passengerTicketStr': self.passenger_ticket_str,
             'oldPassengerStr': self.old_passenger_str,
             'randCode': '',
-            'purpose_codes': self.user_ins.ticket_info_for_passenger_form['purpose_codes'],
-            'key_check_isChange': self.user_ins.ticket_info_for_passenger_form['key_check_isChange'],
-            'leftTicketStr': self.user_ins.ticket_info_for_passenger_form['leftTicketStr'],
-            'train_location': self.user_ins.ticket_info_for_passenger_form['train_location'],
+            'purpose_codes': tif['purpose_codes'],
+            'key_check_isChange': tif['key_check_isChange'],
+            'leftTicketStr': tif['leftTicketStr'],
+            'train_location': tif['train_location'],
             'choose_seats': '',
             'seatDetailType': '000',
             'whatsSelect': '1',
@@ -483,24 +535,29 @@ class Order:
             result = response.json()
         except Exception:
             result = {}
+        print('[DEBUG confirmSingle] status={} result={}'.format(
+            response.status_code, str(result)[:400] if result else 'EMPTY'))
 
-        if 'data' in result:
+        # 用 raw 访问避免 Dict.get 在某些情况下返回 None
+        data_obj = result.get('data') if result.get('data') else {}
+        if 'data' in result and isinstance(data_obj, dict):
             """
            "data": {
                 "submitStatus": true
             }
             """
-            if result.get('data.submitStatus'):  # 成功
+            # 用 raw 访问避免 Dict.get 在某些情况下返回 None
+            if data_obj.get('submitStatus'):  # 成功
                 OrderLog.add_quick_log(OrderLog.MESSAGE_CONFIRM_SINGLE_FOR_QUEUE_SUCCESS).flush()
                 return True
             else:
                 # 加入小黑屋 TODO
                 OrderLog.add_quick_log(
                     OrderLog.MESSAGE_CONFIRM_SINGLE_FOR_QUEUE_ERROR.format(
-                        result.get('data.errMsg', CommonLog.MESSAGE_RESPONSE_EMPTY_ERROR))).flush()
+                        data_obj.get('errMsg') or CommonLog.MESSAGE_RESPONSE_EMPTY_ERROR)).flush()
         else:
             OrderLog.add_quick_log(OrderLog.MESSAGE_CONFIRM_SINGLE_FOR_QUEUE_FAIL.format(
-                result.get('messages', CommonLog.MESSAGE_RESPONSE_EMPTY_ERROR))).flush()
+                result.get('messages') or CommonLog.MESSAGE_RESPONSE_EMPTY_ERROR)).flush()
         return False
 
     def query_order_wait_time(self):
@@ -602,8 +659,9 @@ class Order:
         passenger_tickets = []
         old_passengers = []
         available_passengers = self.query_ins.passengers
-        if len(available_passengers) > self.query_ins.member_num_take:  # 删除人数
-            available_passengers = available_passengers[0:self.query_ins.member_num_take]
+        # 一次只下一张票:无论配置多少乘客,只取第一位
+        if len(available_passengers) > 1:
+            available_passengers = available_passengers[0:1]
             OrderLog.print_passenger_did_deleted(available_passengers)
 
         for passenger in available_passengers:

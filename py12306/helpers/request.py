@@ -12,6 +12,12 @@ class Request(HTMLSession):
     请求处理类
     """
 
+    def __init__(self):
+        super().__init__()
+        # 注册 _handle_response 到 response hooks,这样每次响应都会 expand_class,
+        # response.json() 才会返回 Dict 而不是普通 dict
+        self.hooks['response'].append(self._handle_response)
+
     # session = {}
     def save_to_file(self, url, path):
         response = self.get(url, stream=True)
@@ -28,8 +34,11 @@ class Request(HTMLSession):
         :param kwargs:
         :return:
         """
-        response = HTMLSession._handle_response(response, **kwargs)
-        expand_class(response, 'json', Request.json)
+        # requests-html 的 HTMLSession 没有 _handle_response 方法(叫 response_hook)。
+        # 原代码调用 HTMLSession._handle_response 一直 AttributeError,导致这条路径从未生效。
+        # 这里直接做 expand_class,无需转换 response 类型,只需在 response 上设置 json 方法即可。
+        if response is not None:
+            expand_class(response, 'json', Request.json)
         return response
 
     def add_response_hook(self, hook):
